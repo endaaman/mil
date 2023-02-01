@@ -110,7 +110,7 @@ class TileDataset(Dataset):
         if self.y_is_including_zero:
             # include "0"
             y = torch.any(ys == 0)
-            y = y.to(torch.float32)[None]
+            y = y.to(torch.float32)
         else:
             # y = (ys == 0).to(torch.float32)
             y = ys
@@ -154,11 +154,12 @@ def train():
             optimizer.zero_grad()
             preds = model(xs)
             preds = torch.sigmoid(preds)
+            print()
             if as_tile:
                 attention = mil(preds)
                 pred = (preds[:, 0] * attention).sum()
                 # pred = torch.sigmoid(pred)
-                loss = criterion(pred, y[0])
+                loss = criterion(pred, y)
             else:
                 # preds = torch.sigmoid(preds)
                 # preds = torch.softmax(preds, dim=-1)
