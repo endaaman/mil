@@ -34,7 +34,7 @@ class ToyModel(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.pool = nn.AdaptiveAvgPool2d(4)
-        self.fc = nn.Linear(512, 10)
+        self.fc = nn.Linear(512, num_classes)
 
     def forward(self, x):
         # x = self.base(x)
@@ -125,19 +125,21 @@ class TileDataset(Dataset):
 def train():
     EPOCH = 10000
 
-    model = ToyModel(num_classes=10)
-    attention = MILAttention(num_classes=1, params_size=100)
+    as_tile = True
 
 
-    as_tile = False
+    train_dataset = TileDataset(train=True, y_is_including_zero=as_tile)
     if as_tile:
         criterion = nn.BCELoss()
+        model = ToyModel(num_classes=1)
+        mil = MILAttention(num_classes=1, params_size=100)
+        params = list(model.parameters()) + list(mil.parameters())
     else:
+        model = ToyModel(num_classes=10)
         criterion = nn.CrossEntropyLoss()
-    train_dataset = TileDataset(train=True, y_is_including_zero=as_tile)
+        params = model.parameters()
 
-
-    optimizer = optim.RAdam(model.parameters(), lr=0.01)
+    optimizer = optim.RAdam(params, lr=0.01)
 
     t_epoch = tqdm(range(EPOCH))
     epoch_losses = []
@@ -151,10 +153,12 @@ def train():
 
             optimizer.zero_grad()
             preds = model(xs)
+            preds = torch.sigmoid(preds)
             if as_tile:
-                preds = attention(preds)
-                preds = torch.sigmoid(preds)
-                loss = criterion(preds, y)
+                attention = mil(preds)
+                pred = (preds[:, 0] * attention).sum()
+                # pred = torch.sigmoid(pred)
+                loss = criterion(pred, y[0])
             else:
                 # preds = torch.sigmoid(preds)
                 # preds = torch.softmax(preds, dim=-1)
@@ -178,7 +182,8 @@ def train():
         acc = np.sum(correction) / len(correction)
         epoch_losses.append(np.mean(losses))
         epoch_accs.append(acc)
-        t_epoch.set_description(f'epoch loss: {epoch_losses[-1]:.3f} acc:{acc:.3f}')
+        a = ','.join([f'{f:.3f}' for f in attention.tolist()])
+        t_epoch.set_description(f'epoch loss: {epoch_losses[-1]:.3f} acc:{acc:.3f} a:{a}')
         t_epoch.refresh()
 
         plt.plot(epoch_losses)
@@ -209,6 +214,7 @@ def model_test():
     x = torch.randn(3, 1, 28, 28)
     y = model(x)
     print(y.shape)
+    print(type(model.parameters()))
 
 if __name__ == '__main__':
     cli()
