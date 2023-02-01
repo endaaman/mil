@@ -22,13 +22,30 @@ def cli():
 class ToyModel(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
-        self.base = ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
-        self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        # self.base = /esNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+        # self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+
+        self.convs = nn.Sequential(
+            nn.Conv2d(1, 32, 3, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, 3, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, 3, 1),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(4)
+        self.fc = nn.Linear(512, 10)
 
     def forward(self, x):
-        x = self.base(x)
+        # x = self.base(x)
         # return torch.sigmoid(x)
+        x = self.convs(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
         return x
+
+
 
 
 class MILAttention(nn.Module):
@@ -87,8 +104,8 @@ class TileDataset(Dataset):
 
         # x = make_grid(xs.view(9, 1, 28, 28), nrow=3, padding=0)[0]
         # x = x.float() / 255
-        xs = xs[:, None, :, :]
-        xs = (xs / 255) * 2 - 1.0
+        xs = xs[:, None, :, :].to(torch.float32)
+        xs = (xs / 255)
 
         if self.y_is_including_zero:
             # include "0"
@@ -120,7 +137,7 @@ def train():
     train_dataset = TileDataset(train=True, y_is_including_zero=as_tile)
 
 
-    optimizer = optim.RAdam(model.parameters(), lr=0.001)
+    optimizer = optim.RAdam(model.parameters(), lr=0.01)
 
     t_epoch = tqdm(range(EPOCH))
     epoch_losses = []
@@ -149,7 +166,8 @@ def train():
             loss.backward()
             optimizer.step()
 
-            c = (y == torch.argmax(preds[0])).tolist()
+            p = torch.argmax(preds, dim=1)
+            c = (y == p).tolist()
             correction += c
             acc = np.sum(c) / len(c)
             losses.append(loss.item())
@@ -184,6 +202,13 @@ def MIL_test():
     mil = MILAttention(num_classes=num_classes)
     attention = mil(preds)
     print(attention)
+
+@cli.command()
+def model_test():
+    model = ToyModel(num_classes=10)
+    x = torch.randn(3, 1, 28, 28)
+    y = model(x)
+    print(y.shape)
 
 if __name__ == '__main__':
     cli()
