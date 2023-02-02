@@ -49,7 +49,7 @@ class ToyModel(nn.Module):
 
 
 class MILAttention(nn.Module):
-    def __init__(self, num_classes, params_size=10):
+    def __init__(self, num_classes, params_size=100):
         super().__init__()
         self.num_classes = num_classes
         self.params_size = params_size
@@ -64,12 +64,20 @@ class MILAttention(nn.Module):
         Returns:
             Tensor: (1, )
         '''
-        #  w^T*(tanh(u*h_k^T)*sigmoid(v*h_k^T))
+        # x: (i, )
+        # u: (p, i, )
+        # v: (p, i, )
         xu = torch.tanh(torch.matmul(self.u, x))
         xv = torch.sigmoid(torch.matmul(self.v, x))
+
+        # xu: (p, )
+        # xu: (p, )
         x = xu * xv
-        x = torch.matmul(x, self.w)
-        return x
+
+        # x: (p, )
+        # w: (p, i, )
+        attention = torch.matmul(x, self.w)
+        return attention
 
     def forward(self, preds):
         '''
@@ -81,7 +89,13 @@ class MILAttention(nn.Module):
         instances = []
         for pred in preds:
             instances.append(self.compute_attention_scores(pred))
-        attention = torch.softmax(torch.stack(instances).squeeze(), dim=-1)
+
+        # if self.num_classes > 1:
+        #     x = torch.softmax(x, dim=-1)
+        # else:
+        #     x = torch.sigmoid(x)
+        attention = torch.stack(instances)
+        attention = torch.softmax(attention.squeeze(), dim=0)
         return attention
 
 
@@ -99,22 +113,14 @@ class TileDataset(Dataset):
 
     def __getitem__(self, i):
         idx = torch.randint(len(self.base.data), [9])
-        xs = self.base.data[idx]
-        ys = self.base.targets[idx]
+        x = self.base.data[idx]
+        y = self.base.targets[idx]
 
         # x = make_grid(xs.view(9, 1, 28, 28), nrow=3, padding=0)[0]
         # x = x.float() / 255
-        xs = xs[:, None, :, :].to(torch.float32)
-        xs = (xs / 255)
-
-        if self.y_is_including_zero:
-            # include "0"
-            y = torch.any(ys == 0)
-            y = y.to(torch.float32)
-        else:
-            # y = (ys == 0).to(torch.float32)
-            y = ys
-        return xs, y
+        x = x[:, None, :, :].to(torch.float32)
+        x = x / 255
+        return x, y
 
     def __len__(self):
         return 100
@@ -122,21 +128,20 @@ class TileDataset(Dataset):
 
 
 @cli.command()
-def train():
-    EPOCH = 10000
+@click.option('--mil', 'use_mil', is_flag=True)
+def train(use_mil):
+    EPOCH = 100
 
-    as_tile = True
+    train_dataset = TileDataset(train=True, y_is_including_zero=use_mil)
 
+    model = ToyModel(num_classes=10)
+    criterion = nn.CrossEntropyLoss()
 
-    train_dataset = TileDataset(train=True, y_is_including_zero=as_tile)
-    if as_tile:
-        criterion = nn.BCELoss()
-        model = ToyModel(num_classes=1)
-        mil = MILAttention(num_classes=1, params_size=100)
+    if use_mil:
+        mil = MILAttention(num_classes=10, params_size=100)
+        mil_criterion = nn.BCELoss()
         params = list(model.parameters()) + list(mil.parameters())
     else:
-        model = ToyModel(num_classes=10)
-        criterion = nn.CrossEntropyLoss()
         params = model.parameters()
 
     optimizer = optim.RAdam(params, lr=0.01)
@@ -144,52 +149,67 @@ def train():
     t_epoch = tqdm(range(EPOCH))
     epoch_losses = []
     epoch_accs = []
+    epoch_mil_losses = []
+    epoch_mil_acc = []
     for epoch in t_epoch:
         t_batch = tqdm(range(len(train_dataset)), leave=False)
-        correction = []
         losses = []
+        mil_losses = []
+        correction = []
+        mil_correction = []
         for i in t_batch:
-            xs, y = train_dataset[i]
-
+            x, gts = train_dataset[i]
             optimizer.zero_grad()
-            preds = model(xs)
-            preds = torch.sigmoid(preds)
-            print()
-            if as_tile:
+            preds = model(x)
+            base_loss = criterion(preds, gts)
+            p = torch.argmax(preds, dim=1)
+            if use_mil:
+                has_zero = torch.any(gts == 0).to(torch.float32)
                 attention = mil(preds)
-                pred = (preds[:, 0] * attention).sum()
-                # pred = torch.sigmoid(pred)
-                loss = criterion(pred, y)
+                pred = torch.sigmoid((preds * attention[:, None]).sum())
+                mil_loss = mil_criterion(pred, has_zero)
+                loss = base_loss + mil_loss
+                # p = (preds > 0.5).flatten()
+                mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
+                mil_losses += [mil_loss.item()]
             else:
-                # preds = torch.sigmoid(preds)
-                # preds = torch.softmax(preds, dim=-1)
-                # print(preds.shape)
-                # print(y.shape)
-                # print(preds)
-                # print(y)
-                loss = criterion(preds, y)
+                loss = base_loss
+            c = (gts == p).tolist()
+            # print('gts', gts)
+            # print('p', p)
+            # print('c', c)
+            acc = np.sum(c) / len(c)
+            correction += c
+            losses += [base_loss.item()]
             loss.backward()
             optimizer.step()
-
-            p = torch.argmax(preds, dim=1)
-            c = (y == p).tolist()
-            correction += c
-            acc = np.sum(c) / len(c)
-            losses.append(loss.item())
-            t_batch.set_description(f'loss: {loss:.3f} acc:{acc:.3f}')
+            m = f'loss: {loss:.3f} acc:{acc:.3f}'
+            if use_mil:
+                m += f'mil_loss:{mil_loss:.3f}'
+            t_batch.set_description(m)
             t_batch.refresh()
-
 
         acc = np.sum(correction) / len(correction)
         epoch_losses.append(np.mean(losses))
         epoch_accs.append(acc)
-        a = ','.join([f'{f:.3f}' for f in attention.tolist()])
-        t_epoch.set_description(f'epoch loss: {epoch_losses[-1]:.3f} acc:{acc:.3f} a:{a}')
+        m = f'epoch loss: {epoch_losses[-1]:.3f} acc:{acc:.3f}'
+        if use_mil:
+            epoch_mil_losses.append(np.mean(mil_losses))
+            mil_acc = np.sum(mil_correction) / len(mil_correction)
+            epoch_mil_acc.append(mil_acc)
+            m += f' mil:{mil_acc:.3f}'
+            m += ' a:' + ','.join([f'{f:.3f}' for f in attention.flatten().tolist()])
+        t_epoch.set_description(m)
         t_epoch.refresh()
 
-        plt.plot(epoch_losses)
-        plt.plot(epoch_accs)
-        plt.savefig('out/loss.png')
+        plt.plot(epoch_losses, label='loss')
+        plt.plot(epoch_accs, label='acc')
+        if use_mil:
+            plt.plot(epoch_mil_losses, label='mil loss')
+            plt.plot(epoch_mil_acc, label='mil acc')
+        plt.legend()
+        plt.grid()
+        plt.savefig('out/mil.png' if use_mil else 'out/base.png')
         plt.close()
 
 
@@ -202,7 +222,7 @@ def train():
 @cli.command()
 def MIL_test():
     instance_count = 3
-    num_classes = 10
+    num_classes = 2
 
     preds = torch.randn(instance_count, num_classes)
     mil = MILAttention(num_classes=num_classes)
