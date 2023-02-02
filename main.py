@@ -169,15 +169,13 @@ def train(use_mil):
                 pred = torch.sigmoid((preds * attention[:, None]).sum())
                 mil_loss = mil_criterion(pred, has_zero)
                 loss = base_loss + mil_loss
+                loss = base_loss
                 # p = (preds > 0.5).flatten()
                 mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
                 mil_losses += [mil_loss.item()]
             else:
                 loss = base_loss
             c = (gts == p).tolist()
-            # print('gts', gts)
-            # print('p', p)
-            # print('c', c)
             acc = np.sum(c) / len(c)
             correction += c
             losses += [base_loss.item()]
