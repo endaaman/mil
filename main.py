@@ -45,6 +45,16 @@ class ToyModel(nn.Module):
         x = self.fc(x)
         return x
 
+class ToyResNet(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.base = ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+        self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+
+    def forward(self, x):
+        x = self.base(x)
+        return x
+
 
 
 
@@ -123,18 +133,18 @@ class TileDataset(Dataset):
         return x, y
 
     def __len__(self):
-        return 100
+        return 1000
 
 
 
 @cli.command()
 @click.option('--mil', 'use_mil', is_flag=True)
 def train(use_mil):
-    EPOCH = 100
+    EPOCH = 500
 
     train_dataset = TileDataset(train=True, y_is_including_zero=use_mil)
 
-    model = ToyModel(num_classes=10)
+    model = ToyResNet(num_classes=10)
     criterion = nn.CrossEntropyLoss()
 
     if use_mil:
@@ -147,13 +157,13 @@ def train(use_mil):
     optimizer = optim.RAdam(params, lr=0.01)
 
     t_epoch = tqdm(range(EPOCH))
-    epoch_losses = []
+    epoch_base_losses = []
     epoch_accs = []
     epoch_mil_losses = []
     epoch_mil_acc = []
     for epoch in t_epoch:
         t_batch = tqdm(range(len(train_dataset)), leave=False)
-        losses = []
+        base_losses = []
         mil_losses = []
         correction = []
         mil_correction = []
@@ -168,8 +178,7 @@ def train(use_mil):
                 attention = mil(preds)
                 pred = torch.sigmoid((preds * attention[:, None]).sum())
                 mil_loss = mil_criterion(pred, has_zero)
-                loss = base_loss + mil_loss
-                loss = base_loss
+                loss = base_loss + mil_loss * 0.3
                 # p = (preds > 0.5).flatten()
                 mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
                 mil_losses += [mil_loss.item()]
@@ -178,7 +187,7 @@ def train(use_mil):
             c = (gts == p).tolist()
             acc = np.sum(c) / len(c)
             correction += c
-            losses += [base_loss.item()]
+            base_losses += [base_loss.item()]
             loss.backward()
             optimizer.step()
             m = f'loss: {loss:.3f} acc:{acc:.3f}'
@@ -188,9 +197,9 @@ def train(use_mil):
             t_batch.refresh()
 
         acc = np.sum(correction) / len(correction)
-        epoch_losses.append(np.mean(losses))
+        epoch_base_losses.append(np.mean(base_losses))
         epoch_accs.append(acc)
-        m = f'epoch loss: {epoch_losses[-1]:.3f} acc:{acc:.3f}'
+        m = f'epoch loss: {epoch_base_losses[-1]:.3f} acc:{acc:.3f}'
         if use_mil:
             epoch_mil_losses.append(np.mean(mil_losses))
             mil_acc = np.sum(mil_correction) / len(mil_correction)
@@ -200,7 +209,7 @@ def train(use_mil):
         t_epoch.set_description(m)
         t_epoch.refresh()
 
-        plt.plot(epoch_losses, label='loss')
+        plt.plot(epoch_base_losses, label='loss')
         plt.plot(epoch_accs, label='acc')
         if use_mil:
             plt.plot(epoch_mil_losses, label='mil loss')
