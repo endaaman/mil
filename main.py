@@ -2,6 +2,7 @@ import time
 from tqdm import tqdm
 
 import numpy as np
+import matplotlib
 from matplotlib import pyplot as plt
 import torch
 import torch
@@ -140,11 +141,15 @@ class TileDataset(Dataset):
 @cli.command()
 @click.option('--mil', 'use_mil', is_flag=True)
 def train(use_mil):
+    matplotlib.use('Agg')
     EPOCH = 500
+
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    print(device)
 
     train_dataset = TileDataset(train=True, y_is_including_zero=use_mil)
 
-    model = ToyResNet(num_classes=10)
+    model = ToyResNet(num_classes=10).to(device)
     criterion = nn.CrossEntropyLoss()
 
     if use_mil:
@@ -170,7 +175,7 @@ def train(use_mil):
         for i in t_batch:
             x, gts = train_dataset[i]
             optimizer.zero_grad()
-            preds = model(x)
+            preds = model(x.to(device)).to('cpu')
             base_loss = criterion(preds, gts)
             p = torch.argmax(preds, dim=1)
             if use_mil:
@@ -218,7 +223,6 @@ def train(use_mil):
         plt.grid()
         plt.savefig('out/mil.png' if use_mil else 'out/base.png')
         plt.close()
-
 
     # model = ToyModel()
     # t = torch.ones(2, 1, 28, 28)
