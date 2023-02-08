@@ -1,10 +1,11 @@
 import time
+
 from tqdm import tqdm
+import click
 
 import numpy as np
 import matplotlib
 from matplotlib import pyplot as plt
-import torch
 import torch
 from torch import optim, nn
 import torch.nn.functional as F
@@ -13,130 +14,13 @@ from torchvision.utils import make_grid
 from torchvision import datasets, transforms
 from torchvision.models.resnet import ResNet, BasicBlock
 
-import click
+from models import CNNModel, ClassifierModel, AttentionModel, MILModel
+from datasets import MNISTDataset, MNISTMILDataset
+
 
 @click.group()
 def cli():
     pass
-
-
-class ToyModel(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        # self.base = /esNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
-        # self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-
-        self.convs = nn.Sequential(
-            nn.Conv2d(1, 32, 3, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 3, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, 3, 1),
-            nn.ReLU(inplace=True),
-        )
-        self.pool = nn.AdaptiveAvgPool2d(4)
-        self.fc = nn.Linear(512, num_classes)
-
-    def forward(self, x):
-        # x = self.base(x)
-        # return torch.sigmoid(x)
-        x = self.convs(x)
-        x = self.pool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
-
-class ToyResNet(nn.Module):
-    def __init__(self, num_classes):
-        super().__init__()
-        self.base = ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
-        self.base.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-
-    def forward(self, x):
-        x = self.base(x)
-        return x
-
-
-
-
-class MILAttention(nn.Module):
-    def __init__(self, num_classes, params_size=100):
-        super().__init__()
-        self.num_classes = num_classes
-        self.params_size = params_size
-        self.u = nn.Parameter(torch.randn(params_size, num_classes))
-        self.v = nn.Parameter(torch.randn(params_size, num_classes))
-        self.w = nn.Parameter(torch.randn(params_size, 1))
-
-    def compute_attention_scores(self, x):
-        '''
-        Args:
-            x (Tensor): (C, ) logits by instance
-        Returns:
-            Tensor: (1, )
-        '''
-        # x: (i, )
-        # u: (p, i, )
-        # v: (p, i, )
-        xu = torch.tanh(torch.matmul(self.u, x))
-        xv = torch.sigmoid(torch.matmul(self.v, x))
-
-        # xu: (p, )
-        # xu: (p, )
-        x = xu * xv
-
-        # x: (p, )
-        # w: (p, i, )
-        attention = torch.matmul(x, self.w)
-        return attention
-
-    def forward(self, preds):
-        '''
-        Args:
-            preds (Tensor): (B, C) batched logits
-        Returns:
-            Tensor: attention P-values (B, ) [0, 1]
-        '''
-        instances = []
-        for pred in preds:
-            instances.append(self.compute_attention_scores(pred))
-
-        # if self.num_classes > 1:
-        #     x = torch.softmax(x, dim=-1)
-        # else:
-        #     x = torch.sigmoid(x)
-        attention = torch.stack(instances)
-        attention = torch.softmax(attention.squeeze(), dim=0)
-        return attention
-
-
-class TileDataset(Dataset):
-    def __init__(self, train=True, y_is_including_zero=True):
-        self.y_is_including_zero = y_is_including_zero
-        self.base = datasets.MNIST(
-            './data/mnist',
-            train = True,
-            download = True,
-            transform = transforms.Compose([
-                transforms.ToTensor()
-            ]),
-        )
-
-    def __getitem__(self, i):
-        idx = torch.randint(len(self.base.data), [9])
-        x = self.base.data[idx]
-        y = self.base.targets[idx]
-
-        # x = make_grid(xs.view(9, 1, 28, 28), nrow=3, padding=0)[0]
-        # x = x.float() / 255
-        x = x[:, None, :, :].to(torch.float32)
-        x = x / 255
-        return x, y
-
-    def __len__(self):
-        return 1000
-
-
 
 @cli.command()
 @click.option('--mil', 'use_mil', is_flag=True)
@@ -145,21 +29,17 @@ def train(use_mil):
     EPOCH = 500
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    print(device)
 
-    train_dataset = TileDataset(train=True, y_is_including_zero=use_mil)
+    train_dataset = MNISTMILDataset(train=True)
+    cnn_model = CNNModel(num_classes=10)
+    cls_model = ClassifierModel(num_features=cnn_model.num_features, num_classes=10)
+    attentio_model = AttentionModel(num_features=cnn_model.num_features)
 
-    model = ToyResNet(num_classes=10).to(device)
-    criterion = nn.CrossEntropyLoss()
+    cnn_optimizer = optim.RAdam(cnn_model.parameters(), lr=0.01)
+    cls_optimizer = optim.RAdam(cls_model.parameters(), lr=0.01)
+    attention_optimizer = optim.RAdam(attentio_model.parameters(), lr=0.01)
 
-    if use_mil:
-        mil = MILAttention(num_classes=10, params_size=100)
-        mil_criterion = nn.BCELoss()
-        params = list(model.parameters()) + list(mil.parameters())
-    else:
-        params = model.parameters()
-
-    optimizer = optim.RAdam(params, lr=0.01)
+    cross_entropy = nn.CrossEntropyLoss()
 
     t_epoch = tqdm(range(EPOCH))
     epoch_base_losses = []
@@ -173,29 +53,48 @@ def train(use_mil):
         correction = []
         mil_correction = []
         for i in t_batch:
-            x, gts = train_dataset[i]
-            optimizer.zero_grad()
-            preds = model(x.to(device)).to('cpu')
+            x, gt = train_dataset[i]
+            x = x.to(device)
+            gt = gt.to(device)
+
+            cnn_optimizer.zero_grad()
+            cls_optimizer.zero_grad()
+            attention_optimizer.zero_grad()
+
+            features = cnn_model(x)
+            preds = cls_model(features)
+            attentions = attentio_model(features)
+
+            pred = torch.softmax((preds * attentions[:, None]).sum(dim=0), dim=-1)
+            loss_bag = cross_entropy(pred, gt)
+            print('loss_bag', loss_bag)
+
+            loss_instances = cross_entropy(preds, gt.repeat(preds.shape[0]))
+
+            print('loss_instances', loss_instances)
+
+            attentions = attentio_model(features)
+            preds = cls_model(features)
+
             base_loss = criterion(preds, gts)
             p = torch.argmax(preds, dim=1)
-            if use_mil:
-                has_zero = torch.any(gts == 0).to(torch.float32)
-                attention = mil(preds)
-                pred = torch.sigmoid((preds * attention[:, None]).sum())
-                mil_loss = mil_criterion(pred, has_zero)
-                loss = base_loss + mil_loss * 0.3
-                # p = (preds > 0.5).flatten()
-                mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
-                mil_losses += [mil_loss.item()]
-            else:
-                loss = base_loss
+
+            has_zero = torch.any(gts == 0).to(torch.float32)
+            attention = mil(preds)
+            pred = torch.sigmoid((preds * attention[:, None]).sum())
+            mil_loss = mil_criterion(pred, has_zero)
+            loss = base_loss + mil_loss * 0.3
+            # p = (preds > 0.5).flatten()
+            mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
+            mil_losses += [mil_loss.item()]
+
             c = (gts == p).tolist()
             acc = np.sum(c) / len(c)
             correction += c
             base_losses += [base_loss.item()]
             loss.backward()
             optimizer.step()
-            m = f'loss: {loss:.3f} acc:{acc:.3f}'
+            m = f'[{epoch}/{EPOCH}] loss: {loss:.3f} acc:{acc:.3f}'
             if use_mil:
                 m += f'mil_loss:{mil_loss:.3f}'
             t_batch.set_description(m)
