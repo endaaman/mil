@@ -3,6 +3,7 @@ import time
 from tqdm import tqdm
 import click
 
+import pandas as pd
 import numpy as np
 import matplotlib
 from matplotlib import pyplot as plt
@@ -39,19 +40,20 @@ def train(use_mil):
     cls_optimizer = optim.RAdam(cls_model.parameters(), lr=0.01)
     attention_optimizer = optim.RAdam(attentio_model.parameters(), lr=0.01)
 
-    cross_entropy = nn.CrossEntropyLoss()
+    cross_entropy = nn.CrossEntropyLoss(reduction='none')
 
     t_epoch = tqdm(range(EPOCH))
-    epoch_base_losses = []
-    epoch_accs = []
-    epoch_mil_losses = []
-    epoch_mil_acc = []
+    metrics = []
+    cols = [
+        'loss_instances',
+        'loss_overall',
+        'acc_instances',
+        'acc_overall',
+    ]
+
+    df = pd.DataFrame(metrics, columns=cols)
     for epoch in t_epoch:
         t_batch = tqdm(range(len(train_dataset)), leave=False)
-        base_losses = []
-        mil_losses = []
-        correction = []
-        mil_correction = []
         for i in t_batch:
             x, gt = train_dataset[i]
             x = x.to(device)
@@ -66,55 +68,49 @@ def train(use_mil):
             attentions = attentio_model(features)
 
             pred = torch.softmax((preds * attentions[:, None]).sum(dim=0), dim=-1)
-            loss_bag = cross_entropy(pred, gt)
-            print('loss_bag', loss_bag)
-
+            loss_bag = cross_entropy(pred, gt).mean()
             loss_instances = cross_entropy(preds, gt.repeat(preds.shape[0]))
 
-            print('loss_instances', loss_instances)
+            beta = -attentions + torch.max(attentions)
 
-            attentions = attentio_model(features)
-            preds = cls_model(features)
+            loss_regulation = -(loss_instances * beta).mean()
+            loss_overall = loss_bag - loss_regulation
 
-            base_loss = criterion(preds, gts)
-            p = torch.argmax(preds, dim=1)
+            cls_optimizer.zero_grad()
+            cnn_optimizer.zero_grad()
+            loss_overall.backward()
+            cls_optimizer.step()
+            cnn_optimizer.step()
 
-            has_zero = torch.any(gts == 0).to(torch.float32)
-            attention = mil(preds)
-            pred = torch.sigmoid((preds * attention[:, None]).sum())
-            mil_loss = mil_criterion(pred, has_zero)
-            loss = base_loss + mil_loss * 0.3
-            # p = (preds > 0.5).flatten()
-            mil_correction += [(pred > 0.5) == (has_zero > 0.5)]
-            mil_losses += [mil_loss.item()]
+            attention_optimizer.zero_grad()
+            loss_instances = cross_entropy(preds, gt.repeat(preds.shape[0]))
+            loss_instances.mean().backward(retain_graph=True)
+            attention_optimizer.step()
 
-            c = (gts == p).tolist()
-            acc = np.sum(c) / len(c)
-            correction += c
-            base_losses += [base_loss.item()]
-            loss.backward()
-            optimizer.step()
-            m = f'[{epoch}/{EPOCH}] loss: {loss:.3f} acc:{acc:.3f}'
-            if use_mil:
-                m += f'mil_loss:{mil_loss:.3f}'
+            m = f'[{epoch}/{EPOCH}] overall:{loss_overall:.3f} instance:{loss_instances:.3f}'
+
+            metrics.append([
+                loss_instances.item(),
+                loss_overall.item(),
+                pred.argmax() == gt,
+            ])
+
             t_batch.set_description(m)
             t_batch.refresh()
 
-        acc = np.sum(correction) / len(correction)
-        epoch_base_losses.append(np.mean(base_losses))
-        epoch_accs.append(acc)
-        m = f'epoch loss: {epoch_base_losses[-1]:.3f} acc:{acc:.3f}'
-        if use_mil:
-            epoch_mil_losses.append(np.mean(mil_losses))
-            mil_acc = np.sum(mil_correction) / len(mil_correction)
-            epoch_mil_acc.append(mil_acc)
-            m += f' mil:{mil_acc:.3f}'
-            m += ' a:' + ','.join([f'{f:.3f}' for f in attention.flatten().tolist()])
-        t_epoch.set_description(m)
+        df_current = pd.DataFrame(metrics, columns=cols).mean()
+        # [sum(v, []) for v in zip(*l)]
+
+        metrics_messages = []
+        for k, v in df.mean().items():
+            metrics_messages.append(f'{k}:{v:.3f}')
+        metrics_message = ' '.join(metrics_messages)
+        t_epoch.set_description(metrics_message)
         t_epoch.refresh()
 
-        plt.plot(epoch_base_losses, label='loss')
-        plt.plot(epoch_accs, label='acc')
+        for k, v in df.mean().items():
+            plt.plot(epoch_base_losses, label='loss')
+            plt.plot(epoch_accs, label='acc')
         if use_mil:
             plt.plot(epoch_mil_losses, label='mil loss')
             plt.plot(epoch_mil_acc, label='mil acc')
